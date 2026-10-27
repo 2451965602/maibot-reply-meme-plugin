@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "fjyxyz.reply-meme",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "name": "回复配图·梗鲸",
   "description": "从梗鲸图库筛选贴切表情包，并只发送到当前 QQ 聊天流。",
   "author": {"name": "fjyxyz", "url": "https://github.com/2451965602"},

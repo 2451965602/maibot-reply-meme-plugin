@@ -34,7 +34,7 @@ class PluginSectionConfig(PluginConfigBase):
     """MaiBot's mandatory versioned plugin section."""
 
     enabled: bool = Field(default=True, description="是否启用回复配图工具")
-    config_version: str = Field(default="1.0.2", description="插件配置版本")
+    config_version: str = Field(default="1.0.3", description="插件配置版本")
 
 
 class MemeSettings(PluginConfigBase):
@@ -193,6 +193,7 @@ class ReplyMemePlugin(MaiBotPlugin):
     @Tool(
         name="find_meme",
         platforms="qq",
+        core_tool=True,
         description="从 aigengtu.com 选择贴切表情包并只发送到当前聊天流。mode=request 仅用于用户明确要图；mode=reply 只用于轻松聊天，严肃或技术内容不要调用。每次最多调用一次，发送成功后继续原本的文字回复。",
         parameters=[
             ToolParameterInfo(name="mode", param_type=ToolParamType.STRING, description="reply=轻松回复配图；request=用户明确点图", required=True),
