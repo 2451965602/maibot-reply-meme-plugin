@@ -86,6 +86,16 @@ class ReplyMemePlugin(MaiBotPlugin):
         """Required MaiBot lifecycle hook; initializes only in-memory caches."""
         self.ctx.logger.info("回复配图工具已加载")
 
+    async def on_unload(self) -> None:
+        """Required MaiBot lifecycle hook; no network session survives between calls."""
+        self._running.clear()
+        self.ctx.logger.info("回复配图工具已卸载")
+
+    async def on_config_update(self, scope: str, config_data: dict[str, Any], version: str) -> None:
+        """Apply WebUI changes to this plugin's own configuration."""
+        if scope == "self":
+            self.set_plugin_config(config_data)
+
     async def _read(self, session: aiohttp.ClientSession, url: str, limit: int) -> bytes:
         current = _trusted_url(url)
         for _ in range(4):
