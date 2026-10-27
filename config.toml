@@ -1,3 +1,8 @@
+[plugin]
+enabled = true
+config_version = "1.0.0"
+
+[meme]
 auto_reply = true
 cooldown_seconds = 60
 default_count = 1

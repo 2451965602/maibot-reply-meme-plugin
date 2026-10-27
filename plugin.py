@@ -30,12 +30,24 @@ ROLE_ALIASES = {
 }
 
 
-class MemeConfig(PluginConfigBase):
+class PluginSectionConfig(PluginConfigBase):
+    """MaiBot's mandatory versioned plugin section."""
+
+    enabled: bool = Field(default=True, description="是否启用回复配图工具")
+    config_version: str = Field(default="1.0.0", description="插件配置版本")
+
+
+class MemeSettings(PluginConfigBase):
     auto_reply: bool = Field(default=True, description="允许模型在轻松对话中主动配一张图")
     cooldown_seconds: int = Field(default=60, ge=0, le=3600, description="同一聊天流主动配图冷却时间")
     default_count: int = Field(default=1, ge=1, le=3, description="明确点图时默认张数")
     max_count: int = Field(default=3, ge=1, le=3, description="单次点图最大张数")
     default_character: str = Field(default="auto", description="默认角色；auto 表示不限")
+
+
+class MemeConfig(PluginConfigBase):
+    plugin: PluginSectionConfig = Field(default_factory=PluginSectionConfig)
+    meme: MemeSettings = Field(default_factory=MemeSettings)
 
 
 def _trusted_url(value: str) -> str:
@@ -158,7 +170,7 @@ class ReplyMemePlugin(MaiBotPlugin):
 
     def _rank(self, items: list[dict[str, str]], keyword: str, emotion: str, character: str, random_pick: bool) -> list[dict[str, str]]:
         query = f"{keyword} {emotion}".lower().strip()
-        requested_role = (character or self.config.default_character or "auto").lower().strip()
+        requested_role = (character or self.config.meme.default_character or "auto").lower().strip()
         role = None
         if requested_role not in {"", "auto", "不限", "全部"}:
             for canonical, aliases in ROLE_ALIASES.items():
@@ -193,15 +205,17 @@ class ReplyMemePlugin(MaiBotPlugin):
     )
     async def find_meme(self, mode: str = "", keyword: str = "", emotion: str = "", character: str = "", count: int = 1, random: bool = False, stream_id: str = "", **kwargs: Any) -> dict[str, Any]:
         del kwargs
+        if not self.config.plugin.enabled:
+            return {"success": False, "sent": 0, "error": "回复配图工具已禁用"}
         if mode not in {"reply", "request"}: return {"success": False, "sent": 0, "error": "mode 必须是 reply 或 request"}
         if not stream_id: return {"success": False, "sent": 0, "error": "缺少当前聊天流"}
         if stream_id in self._running: return {"success": True, "sent": 0, "skipped": True, "reason": "当前会话已有配图任务"}
-        if mode == "reply" and not self.config.auto_reply: return {"success": True, "sent": 0, "skipped": True, "reason": "主动配图已关闭"}
-        if mode == "reply" and time.monotonic() - self._last_auto.get(stream_id, 0) < self.config.cooldown_seconds:
+        if mode == "reply" and not self.config.meme.auto_reply: return {"success": True, "sent": 0, "skipped": True, "reason": "主动配图已关闭"}
+        if mode == "reply" and time.monotonic() - self._last_auto.get(stream_id, 0) < self.config.meme.cooldown_seconds:
             return {"success": True, "sent": 0, "skipped": True, "reason": "主动配图冷却中"}
         self._running.add(stream_id)
         try:
-            wanted = 1 if mode == "reply" else max(1, min(int(count or self.config.default_count), self.config.max_count))
+            wanted = 1 if mode == "reply" else max(1, min(int(count or self.config.meme.default_count), self.config.meme.max_count))
             candidates = self._rank(await self._load_gallery(), keyword[:120], emotion[:40], character[:40], mode == "request" and bool(random))
             if not candidates: return {"success": True, "sent": 0, "skipped": True, "reason": "没有贴切表情包，继续文字回复"}
             unseen = [item for item in candidates if hashlib.sha256(item["original"].encode()).hexdigest() not in self._seen.get(stream_id, [])]
