@@ -1,0 +1,5 @@
+auto_reply = true
+cooldown_seconds = 60
+default_count = 1
+max_count = 3
+default_character = "auto"
