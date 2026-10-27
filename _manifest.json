@@ -1,10 +1,10 @@
 {
   "manifest_version": 2,
-  "id": "local.maibot-reply-meme-plugin",
-  "version": "1.0.0",
-  "name": "MaiBot Reply Meme Plugin",
-  "description": "Send a relevant aigengtu.com meme to the invoking QQ chat.",
-  "author": {"name": "2451965602", "url": "https://github.com/2451965602"},
+  "id": "fjyxyz.reply-meme",
+  "version": "1.0.1",
+  "name": "回复配图·梗鲸",
+  "description": "从梗鲸图库筛选贴切表情包，并只发送到当前 QQ 聊天流。",
+  "author": {"name": "fjyxyz", "url": "https://github.com/2451965602"},
   "license": "MIT",
   "urls": {
     "repository": "https://github.com/2451965602/maibot-reply-meme-plugin",
