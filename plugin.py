@@ -34,7 +34,7 @@ class PluginSectionConfig(PluginConfigBase):
     """MaiBot's mandatory versioned plugin section."""
 
     enabled: bool = Field(default=True, description="是否启用回复配图工具")
-    config_version: str = Field(default="1.0.1", description="插件配置版本")
+    config_version: str = Field(default="1.0.2", description="插件配置版本")
 
 
 class MemeSettings(PluginConfigBase):

@@ -1,6 +1,6 @@
 [plugin]
 enabled = true
-config_version = "1.0.1"
+config_version = "1.0.2"
 
 [meme]
 auto_reply = true
