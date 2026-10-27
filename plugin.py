@@ -82,6 +82,10 @@ class ReplyMemePlugin(MaiBotPlugin):
         self._seen: dict[str, list[str]] = {}
         self._running: set[str] = set()
 
+    async def on_load(self) -> None:
+        """Required MaiBot lifecycle hook; initializes only in-memory caches."""
+        self.ctx.logger.info("回复配图工具已加载")
+
     async def _read(self, session: aiohttp.ClientSession, url: str, limit: int) -> bytes:
         current = _trusted_url(url)
         for _ in range(4):
