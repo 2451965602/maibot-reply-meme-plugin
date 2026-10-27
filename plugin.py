@@ -20,6 +20,10 @@ from pydantic import Field
 INDEX_URL = "https://aigengtu.com/gallery-index.json"
 ALLOWED_HOSTS = {"aigengtu.com", "img.aigengtu.com"}
 MAX_BYTES = 12 * 1024 * 1024
+SEEN_DIGEST_LIMIT = 80
+# 不低于 cooldown_seconds 的上限（3600 秒），因此按空闲时间回收不会提前解除主动配图冷却。
+STREAM_CACHE_TTL = 3600.0
+MAX_STREAM_CACHES = 512
 ROLE_ALIASES = {
     "deepseek": ("deepseek娘", "deepseek", "鲸鱼娘", "蓝色大肥鱼", "大肥鱼"),
     "claude": ("claude娘", "claude"), "gpt": ("gpt娘", "chatgpt", "gpt"),
@@ -34,7 +38,7 @@ class PluginSectionConfig(PluginConfigBase):
     """MaiBot's mandatory versioned plugin section."""
 
     enabled: bool = Field(default=True, description="是否启用回复配图工具")
-    config_version: str = Field(default="1.0.3", description="插件配置版本")
+    config_version: str = Field(default="1.0.5", description="插件配置版本")
 
 
 class MemeSettings(PluginConfigBase):
@@ -82,6 +86,66 @@ def _image_size(data: bytes) -> tuple[int, int] | None:
     return None
 
 
+class _StreamCache:
+    """按 stream_id 保存去重摘要和主动配图时间，并统一做惰性回收。
+
+    - 空闲超过 ``ttl`` 秒的聊天流在下次访问时被整体丢弃；
+    - 聊天流条目数超过 ``limit`` 时淘汰最久未写入的聊天流；
+    - 单个聊天流最多保留最近 ``SEEN_DIGEST_LIMIT`` 条去重摘要。
+
+    两类缓存共用同一份存活记录，任何一侧写入都会刷新空闲计时，避免两份
+    dict 各自增长或彼此不同步。上限只是兜底：若同一时刻活跃流多于
+    ``limit``，最久未写入的流会重新参与候选，冷却也可能提前复位。
+    """
+
+    def __init__(self, *, ttl: float = STREAM_CACHE_TTL, limit: int = MAX_STREAM_CACHES) -> None:
+        self._ttl = ttl
+        self._limit = limit
+        self._seen: dict[str, list[str]] = {}
+        self._last_auto: dict[str, float] = {}
+        self._touched: dict[str, float] = {}
+
+    def prune(self, now: float | None = None) -> None:
+        """惰性回收：先按空闲时间 TTL，再按条目数硬上限。"""
+        now = time.monotonic() if now is None else now
+        for stream_id, touched in list(self._touched.items()):
+            if now - touched > self._ttl:
+                self._forget(stream_id)
+        overflow = len(self._touched) - self._limit
+        if overflow > 0:
+            for stream_id, _ in sorted(self._touched.items(), key=lambda pair: pair[1])[:overflow]:
+                self._forget(stream_id)
+
+    def seen(self, stream_id: str) -> list[str]:
+        return self._seen.get(stream_id, [])
+
+    def last_auto(self, stream_id: str) -> float:
+        return self._last_auto.get(stream_id, 0.0)
+
+    def remember(self, stream_id: str, digest: str, now: float | None = None) -> None:
+        now = time.monotonic() if now is None else now
+        digests = self._seen.setdefault(stream_id, [])
+        digests.append(digest)
+        del digests[:-SEEN_DIGEST_LIMIT]
+        self._touch(stream_id, now)
+        self.prune(now)
+
+    def mark_auto(self, stream_id: str, now: float | None = None) -> None:
+        now = time.monotonic() if now is None else now
+        self._last_auto[stream_id] = self._touch(stream_id, now)
+        self.prune(now)
+
+    def _touch(self, stream_id: str, now: float | None = None) -> float:
+        now = time.monotonic() if now is None else now
+        self._touched[stream_id] = now
+        return now
+
+    def _forget(self, stream_id: str) -> None:
+        self._touched.pop(stream_id, None)
+        self._seen.pop(stream_id, None)
+        self._last_auto.pop(stream_id, None)
+
+
 class ReplyMemePlugin(MaiBotPlugin):
     config_model: ClassVar[type[PluginConfigBase] | None] = MemeConfig
 
@@ -90,8 +154,7 @@ class ReplyMemePlugin(MaiBotPlugin):
         self._gallery: list[dict[str, str]] = []
         self._gallery_at = 0.0
         self._gallery_lock = asyncio.Lock()
-        self._last_auto: dict[str, float] = {}
-        self._seen: dict[str, list[str]] = {}
+        self._cache = _StreamCache()
         self._running: set[str] = set()
 
     async def on_load(self) -> None:
@@ -210,16 +273,18 @@ class ReplyMemePlugin(MaiBotPlugin):
             return {"success": False, "sent": 0, "error": "回复配图工具已禁用"}
         if mode not in {"reply", "request"}: return {"success": False, "sent": 0, "error": "mode 必须是 reply 或 request"}
         if not stream_id: return {"success": False, "sent": 0, "error": "缺少当前聊天流"}
+        now = time.monotonic()
+        self._cache.prune(now)
         if stream_id in self._running: return {"success": True, "sent": 0, "skipped": True, "reason": "当前会话已有配图任务"}
         if mode == "reply" and not self.config.meme.auto_reply: return {"success": True, "sent": 0, "skipped": True, "reason": "主动配图已关闭"}
-        if mode == "reply" and time.monotonic() - self._last_auto.get(stream_id, 0) < self.config.meme.cooldown_seconds:
+        if mode == "reply" and now - self._cache.last_auto(stream_id) < self.config.meme.cooldown_seconds:
             return {"success": True, "sent": 0, "skipped": True, "reason": "主动配图冷却中"}
         self._running.add(stream_id)
         try:
             wanted = 1 if mode == "reply" else max(1, min(int(count or self.config.meme.default_count), self.config.meme.max_count))
             candidates = self._rank(await self._load_gallery(), keyword[:120], emotion[:40], character[:40], mode == "request" and bool(random))
             if not candidates: return {"success": True, "sent": 0, "skipped": True, "reason": "没有贴切表情包，继续文字回复"}
-            unseen = [item for item in candidates if hashlib.sha256(item["original"].encode()).hexdigest() not in self._seen.get(stream_id, [])]
+            unseen = [item for item in candidates if hashlib.sha256(item["original"].encode()).hexdigest() not in self._cache.seen(stream_id)]
             queue = unseen or candidates
             if mode == "request" and random: random.shuffle(queue)
             sent: list[dict[str, str]] = []
@@ -237,10 +302,9 @@ class ReplyMemePlugin(MaiBotPlugin):
                         self.ctx.logger.debug("跳过不可用表情包: %s", exc)
                         continue
                     digest = hashlib.sha256(item["original"].encode()).hexdigest()
-                    self._seen.setdefault(stream_id, []).append(digest)
-                    self._seen[stream_id] = self._seen[stream_id][-80:]
+                    self._cache.remember(stream_id, digest)
                     sent.append({"title": item["title"], "source": item["original"]})
-            if mode == "reply" and sent: self._last_auto[stream_id] = time.monotonic()
+            if mode == "reply" and sent: self._cache.mark_auto(stream_id)
             return {"success": bool(sent), "sent": len(sent), "requested": wanted, "partial": len(sent) < wanted, "images": sent}
         except Exception as exc:
             self.ctx.logger.warning("表情包工具失败: %s", exc)
