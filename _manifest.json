@@ -4,8 +4,14 @@
   "version": "1.0.0",
   "name": "MaiBot Reply Meme Plugin",
   "description": "Send a relevant aigengtu.com meme to the invoking QQ chat.",
-  "author": {"name": "2451965602"},
+  "author": {"name": "2451965602", "url": "https://github.com/2451965602"},
   "license": "MIT",
+  "urls": {
+    "repository": "https://github.com/2451965602/maibot-reply-meme-plugin",
+    "homepage": "https://github.com/2451965602/maibot-reply-meme-plugin",
+    "documentation": "https://github.com/2451965602/maibot-reply-meme-plugin#readme",
+    "issues": "https://github.com/2451965602/maibot-reply-meme-plugin/issues"
+  },
   "plugin_type": "media",
   "host_application": {"min_version": "1.3.0", "max_version": "1.3.99"},
   "sdk": {"min_version": "2.5.0", "max_version": "2.99.99"},
