@@ -7,9 +7,7 @@ import base64
 import hashlib
 import random
 import re
-import secrets
 import time
-from collections import OrderedDict
 from typing import Any, ClassVar
 from urllib.parse import urljoin, urlparse
 
@@ -23,9 +21,7 @@ INDEX_URL = "https://aigengtu.com/gallery-index.json"
 ALLOWED_HOSTS = {"aigengtu.com", "img.aigengtu.com"}
 MAX_BYTES = 12 * 1024 * 1024
 MAX_CANDIDATE_BYTES = 1024 * 1024
-MAX_SELECTIONS = 16
 MAX_SELECTION_IMAGES = 4
-SELECTION_TTL = 300.0
 SEEN_DIGEST_LIMIT = 80
 # 不低于 cooldown_seconds 的上限（3600 秒），因此按空闲时间回收不会提前解除主动配图冷却。
 STREAM_CACHE_TTL = 3600.0
@@ -43,7 +39,7 @@ ROLE_ALIASES = {
 class PluginSectionConfig(PluginConfigBase):
     """MaiBot 要求的带版本插件配置。"""
 
-    enabled: bool = Field(default=True, description="是否启用本插件的表情包候选与发送工具")
+    enabled: bool = Field(default=True, description="是否启用本插件的表情包候选工具")
     config_version: str = Field(default="1.0.5", description="插件配置结构版本；由插件用于配置兼容管理")
 
 
@@ -164,14 +160,6 @@ class _StreamCache:
         self._last_auto.pop(stream_id, None)
 
 
-class _MemeSelection:
-    def __init__(self, stream_id: str, mode: str, candidates: list[dict[str, Any]], created: float) -> None:
-        self.stream_id = stream_id
-        self.mode = mode
-        self.candidates = candidates
-        self.created = created
-
-
 class ReplyMemePlugin(MaiBotPlugin):
     config_model: ClassVar[type[PluginConfigBase] | None] = MemeConfig
 
@@ -182,7 +170,6 @@ class ReplyMemePlugin(MaiBotPlugin):
         self._gallery_lock = asyncio.Lock()
         self._cache = _StreamCache()
         self._running: set[str] = set()
-        self._selections: OrderedDict[str, _MemeSelection] = OrderedDict()
 
     async def on_load(self) -> None:
         """Required MaiBot lifecycle hook; initializes only in-memory caches."""
@@ -191,7 +178,6 @@ class ReplyMemePlugin(MaiBotPlugin):
     async def on_unload(self) -> None:
         """Required MaiBot lifecycle hook; no network session survives between calls."""
         self._running.clear()
-        self._selections.clear()
         self.ctx.logger.info("回复配图工具已卸载")
 
     async def on_config_update(self, scope: str, config_data: dict[str, Any], version: str) -> None:
@@ -291,25 +277,11 @@ class ReplyMemePlugin(MaiBotPlugin):
         ranked.sort(key=lambda pair: pair[0], reverse=True)
         return [item for _, item in ranked]
 
-    def _prune_selections(self, now: float | None = None) -> None:
-        now = time.monotonic() if now is None else now
-        for selection_id, selection in list(self._selections.items()):
-            if now - selection.created > SELECTION_TTL:
-                self._selections.pop(selection_id, None)
-
-    def _remember_selection(self, stream_id: str, mode: str, candidates: list[dict[str, Any]]) -> str:
-        self._prune_selections()
-        while len(self._selections) >= MAX_SELECTIONS:
-            self._selections.popitem(last=False)
-        selection_id = secrets.token_urlsafe(12)
-        self._selections[selection_id] = _MemeSelection(stream_id, mode, candidates, time.monotonic())
-        return selection_id
-
     @Tool(
         name="find_meme",
         platforms="qq",
         core_tool=True,
-        description="从 aigengtu.com 查找最多四张候选图并以图片内容返回供视觉模型观察；此工具绝不发送图片。成功结果同时含 selection_id 和 candidates 时，Planner 下一步只能按返回候选调用一次 send_meme(selection_id, choice)，禁止 stop、文字回复或重复 find_meme；仅 send_meme 返回 sent=1 才算完成。失败、skipped 或没有 selection_id 时，才可文字回复或 stop。mode=request 仅用于用户明确要图；mode=reply 只用于轻松聊天，严肃或技术内容不要调用。",
+        description="从 aigengtu.com 查找最多四张候选图并以 content_items 返回供模型观察，不会直接发送。成功后只选择一张，调用 reply 发送正常文字回复，并在 attach_pic 中设置 media_index=tool_result:<本次 find_meme 调用ID>:<从1开始候选序号>；调用ID由宿主填入模板，不得猜测或伪造。随后可 stop；不要调用 send_meme。失败或无候选时继续文字回复。mode=request 仅用于用户明确要图；mode=reply 只用于轻松聊天，严肃或技术内容不要调用。",
         parameters=[
             ToolParameterInfo(name="mode", param_type=ToolParamType.STRING, description="reply=轻松回复配图；request=用户明确点图", required=True),
             ToolParameterInfo(name="keyword", param_type=ToolParamType.STRING, description="1–3 个短关键词", required=False),
@@ -327,7 +299,6 @@ class ReplyMemePlugin(MaiBotPlugin):
         if not stream_id: return {"success": False, "sent": 0, "error": "缺少当前聊天流"}
         now = time.monotonic()
         self._cache.prune(now)
-        self._prune_selections(now)
         if stream_id in self._running: return {"success": True, "sent": 0, "skipped": True, "reason": "当前会话已有配图任务"}
         if mode == "reply" and not self.config.meme.auto_reply: return {"success": True, "sent": 0, "skipped": True, "reason": "主动配图已关闭"}
         if mode == "reply" and now - self._cache.last_auto(stream_id) < self.config.meme.cooldown_seconds:
@@ -361,19 +332,33 @@ class ReplyMemePlugin(MaiBotPlugin):
                     "sent": 0,
                     "skipped": True,
                     "reason": "没有符合大小及校验条件的新候选图片",
-                    "fallback": "继续文字回复；不要调用 send_meme",
+                    "fallback": "继续文字回复；不要附加图片",
                 }
-            selection_id = self._remember_selection(stream_id, mode, prepared)
+            candidate_text = "\n".join(
+                f"- choice={index}: {item['title'] or '无标题'}"
+                for index, item in enumerate(prepared, 1)
+            )
+            for item in prepared:
+                self._cache.remember(stream_id, item["digest"])
+            if mode == "reply":
+                self._cache.mark_auto(stream_id)
+            content = (
+                "已成功返回候选图片，请观察图片并只选择一张。候选序号与标题：\n"
+                f"{candidate_text}\n"
+                "然后调用 reply 发送正常文字回复，并在 attach_pic 中设置：\n"
+                "media_index=tool_result:<本次 find_meme 调用ID>:<从1开始候选序号>\n"
+                "这里的调用ID由宿主自动填入模板，不要猜测或伪造。完成 reply 后可 stop；不要调用 send_meme。"
+            )
             return {
                 "success": True,
                 "sent": 0,
-                "selection_id": selection_id,
+                "content": content,
                 "candidates": [{"choice": index, "title": item["title"]} for index, item in enumerate(prepared, 1)],
                 "content_items": [
                     {"type": "image", "data": base64.b64encode(item["data"]).decode("ascii"), "mime_type": item["mime_type"], "name": f"candidate-{index}.{item['mime_type'].split('/')[-1]}"}
                     for index, item in enumerate(prepared, 1)
                 ],
-                "instruction": "已成功返回 selection_id 和 candidates：请观察候选图片，下一步只能按候选调用一次 send_meme(selection_id, choice)，choice 从 1 开始；禁止 stop、文字回复或重复 find_meme。仅 send_meme 返回 sent=1 才算完成。",
+                "instruction": "请观察候选图，只选一张；调用 reply 发送正常文字回复，并在 attach_pic 中设置 media_index=tool_result:<本次 find_meme 调用ID>:<从1开始候选序号>。调用ID由宿主填入，不要猜测或伪造。随后可 stop；不要调用 send_meme。",
             }
         except Exception as exc:
             self.ctx.logger.warning("表情包工具失败: %s", exc)
@@ -381,61 +366,8 @@ class ReplyMemePlugin(MaiBotPlugin):
                 "success": False,
                 "sent": 0,
                 "error": f"配图未完成：{exc}",
-                "fallback": "继续文字回复；不要调用 send_meme",
+                "fallback": "继续文字回复；不要附加图片",
             }
-        finally:
-            self._running.discard(stream_id)
-
-    @Tool(
-        name="send_meme",
-        platforms="qq",
-        core_tool=True,
-        description="仅在 find_meme 成功返回 selection_id 和 candidates 后调用一次，用返回的 selection_id 与从 1 开始的 choice 发送一张候选图；该阶段禁止 stop、文字回复或重复 find_meme。仅返回 sent=1 才算完成；失败时才可回退为文字回复或 stop。仅可用于原聊天流且候选 5 分钟内有效。",
-        parameters=[
-            ToolParameterInfo(name="selection_id", param_type=ToolParamType.STRING, description="find_meme 返回的 selection_id", required=True),
-            ToolParameterInfo(name="choice", param_type=ToolParamType.INTEGER, description="所选候选序号，从 1 开始", required=True),
-        ],
-    )
-    async def send_meme(self, selection_id: str = "", choice: int = 0, stream_id: str = "", **kwargs: Any) -> dict[str, Any]:
-        del kwargs
-        if not self.config.plugin.enabled:
-            return {"success": False, "sent": 0, "error": "回复配图工具已禁用"}
-        if not selection_id or not stream_id:
-            return {"success": False, "sent": 0, "error": "缺少候选编号或当前聊天流"}
-        now = time.monotonic()
-        self._prune_selections(now)
-        selection = self._selections.get(selection_id)
-        if selection is None:
-            return {"success": False, "sent": 0, "error": "候选已过期或不存在，请重新调用 find_meme"}
-        if selection.stream_id != stream_id:
-            return {"success": False, "sent": 0, "error": "该候选属于其他聊天流，不能跨聊天发送"}
-        try:
-            choice = int(choice)
-        except (TypeError, ValueError):
-            return {"success": False, "sent": 0, "error": "choice 必须是从 1 开始的候选序号"}
-        if choice < 1 or choice > len(selection.candidates):
-            return {"success": False, "sent": 0, "error": f"choice 超出范围，请选择 1 到 {len(selection.candidates)}"}
-        if selection.mode == "reply":
-            if not self.config.meme.auto_reply:
-                self._selections.pop(selection_id, None)
-                return {"success": False, "sent": 0, "error": "主动配图已关闭"}
-            if now - self._cache.last_auto(stream_id) < self.config.meme.cooldown_seconds:
-                return {"success": False, "sent": 0, "error": "主动配图冷却中，请稍后重试"}
-        if stream_id in self._running:
-            return {"success": False, "sent": 0, "error": "当前会话已有配图任务，请稍后重试"}
-        self._running.add(stream_id)
-        self._selections.pop(selection_id, None)
-        candidate = selection.candidates[choice - 1]
-        try:
-            encoded = base64.b64encode(candidate["data"]).decode("ascii")
-            if await self.ctx.send.image(encoded, stream_id) is not True:
-                return {"success": False, "sent": 0, "sendUnconfirmed": True, "error": "平台未确认图片发送；不会自动重发"}
-            self._cache.remember(stream_id, candidate["digest"])
-            if selection.mode == "reply": self._cache.mark_auto(stream_id)
-            return {"success": True, "sent": 1, "image": {"title": candidate["title"], "source": candidate["source"]}}
-        except Exception as exc:
-            self.ctx.logger.warning("表情包发送失败: %s", exc)
-            return {"success": False, "sent": 0, "error": f"图片发送失败：{exc}", "fallback": "继续文字回复；不要重试发送"}
         finally:
             self._running.discard(stream_id)
 
