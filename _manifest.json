@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "fjyxyz.reply-meme",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "name": "梗鲸回复配图",
   "description": "从梗鲸图库筛选四张以内的表情包候选供视觉模型判断，再由 reply.attach_pic 使用 tool_result 媒体索引将选中的一张发送到当前 QQ 聊天流。",
   "author": {"name": "fjyxyz", "url": "https://github.com/2451965602"},
